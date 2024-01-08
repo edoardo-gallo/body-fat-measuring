@@ -1,0 +1,178 @@
+---
+title: "Body Fat by Underwater Weighing"
+author: "E.Gallo, M.Aljafari"
+date: "06 aprile 2020"
+output: html_document
+---
+
+```{r include=FALSE}
+load("bodyfat_class.RData")
+library(e1071)
+library(ggplot2)
+library(caret)
+library(kernlab)
+```
+
+# Description
+
+**Body fat** is expensive and unwieldy to measure directly, as it involves underwater weighing. Thus it would be highly desirable to predict this quantity from easily measurable variables such as **height**, **age**, **weight**, **abdome circumference** and so on. 
+
+This is a data frame containing the estimates of the percentage of body fat determined by underwater weighing (**fat_class**) and various body circumference measurements for 252 men.  
+
+##1.
+Let's have a look at some characteristics of the variables and if there are any **NA** values:
+
+```{r}
+summary(bodyfat)
+
+anyNA(bodyfat)
+```
+
+
+We note that in **height** variable there is a minimum value that is an error and that should be $69.5$ instead of $29.5$.
+
+
+```{r}
+#search for row number that has the mistake
+bodyfat[bodyfat$height == 29.5,]
+
+#change the value
+bodyfat[42,"height"] = 69.5
+
+#check if it's good
+bodyfat[42,]
+```
+
+##2.a
+Since we have a quite wide dataframe would be useless to plot **all the variables togheter**, so we split it in **half** and all the point will be divided in two different colors: **black** if they correspond to the factor value **low** of *fat_class* and **red** if they correspond to **high** 
+
+
+
+```{r}
+plot(bodyfat[,1:7], col = bodyfat$fat_class, pch = 19, main = "First 7 variables scatterplot")
+
+plot(bodyfat[,8:13], col = bodyfat$fat_class, pch = 19, main = "Last 6 variables scatterplot")
+
+```
+
+##2.b
+We focus our attention on a subset of **bodyfat**, taking into account **weight**, **height** and **fat_class**.
+```{r}
+w_h <- bodyfat[,c("weight", "height", "fat_class")]
+head(w_h)
+```
+
+ On this subset we try to apply a linear classifier to see if it succesfully separate **low** from **high** in **fat_class**.  
+ 
+ First we do a $70\%$/$30\%$ split of the dataset in Train-set and Test-set _"by hands" _
+```{r}
+intrain <- sample(1:dim(w_h)[1])
+training <- w_h[intrain[1:floor(dim(w_h)[1]*0.7)], ]
+testing <- w_h[intrain[ceiling(dim(w_h)[1]*0.7):dim(w_h)[1]], ]
+```
+
+We apply the function **svm()** from the **e1071** package, to fit a linear classifier with **fat_class** as response and **weight** and **height** as predictors.
+```{r}
+svm_model<- svm(fat_class ~ .,data = training, 
+                type = "C-classification", 
+                kernel = "linear", 
+                scale = FALSE)
+
+#compute training accuracy
+pred_train <- predict(svm_model, training)
+mean(pred_train == training$fat_class)
+
+#compute test accuracy
+pred_test <- predict(svm_model, testing)
+mean(pred_test == testing$fat_class)
+```
+
+Let's visualize the solution we obtained. We start from visualizing the support vectors on the **training** set
+```{r}
+scatter_plot <- ggplot(data = training, aes(x = weight, y = height, color = fat_class)) + 
+  geom_point(size = 2) + 
+  scale_color_manual(values = c("red", "blue")) +
+  labs(title = "Support Vectors")
+layered_plot <- 
+  scatter_plot + geom_point(data = training[svm_model$index,],
+                            aes(x = weight, y = height), color = "purple",
+                            size = 5, alpha = 0.5)
+layered_plot
+```
+
+Now we add **decision and margin boundaries**
+
+```{r}
+#Find slope and intercept of the boundary
+w <- t(svm_model$coefs) %*% svm_model$SV
+slope_1 <- -w[1]/w[2]
+intercept_1 <- svm_model$rho/w[2]
+#build scatter plot of training dataset
+scatter_plot <- ggplot(data = training, aes(x = weight, y = height, color = fat_class)) + 
+    geom_point(size = 2) + scale_color_manual(values = c("red", "blue"))
+#add decision boundary
+plot_decision <- scatter_plot + geom_abline(slope = slope_1, intercept = intercept_1) 
+#add margin boundaries
+plot_margins <- plot_decision + 
+ geom_abline(slope = slope_1, intercept = intercept_1 - 1/w[2], linetype = "dashed")+
+ geom_abline(slope = slope_1, intercept = intercept_1 + 1/w[2], linetype = "dashed") + 
+  labs(title = "Decision and Margin Boundaries")
+#display plot
+plot_margins
+```
+
+
+##3.
+Now we move to analyze the response variable **fat_class** using all variables as predictors.  
+
+We separate now the dataset in $70\%$/$30\%$ using **createDataPartition()** from the _caret_ package.
+```{r}
+index <- createDataPartition(y = bodyfat$fat_class, p = 0.7, list = F)
+bodytrain <- bodyfat[index,]
+bodytest <- bodyfat[-index,]
+```
+
+##4.
+Now we'll make our analisys through the **ksvm()** function from the **kernlab** package that seems to work better when number of features are very large. We use a _vanilladot_ kernel and we apply the 5-fold cross validation.
+```{r}
+fat<- ksvm(fat_class~., data = bodytrain,kernel = "vanilladot" , cross = 5)
+body <- predict(fat, bodytest[,-14])
+confu <- confusionMatrix(table(body, bodytest[,14]))
+confu
+```
+
+In the confusion matrix the good values are the ones on the main diagonal, on the other diagonal we have mistakes.  
+
+
+##5.
+In the end we try to find the best predictive model varying: the **C** value, that change how we deal with missclassified values, the **bigger** the C the **lesser** the missclassification and viceversa. Then we will vary all the **kernel function** that are in **ksvm()**
+```{r results= 'hide'}
+ci <- c(2^-8, 2^-5, 2^-3, 2^-1, 1, 2, 2^3, 2^5, 2^8)
+kernel <- c("polydot","rbfdot","tanhdot", "vanilladot", 
+            "laplacedot", "besseldot", "anovadot", "splinedot")
+#create a dataframe to store data
+df <- matrix(ncol = 3)
+colnames(df) <- c("Kernel", "C", "Accuracy")
+df <- as.data.frame(df)
+accu <- list()
+#iterate through kernels and Cs
+for(j in kernel){
+  for(i in ci){
+    fat<- ksvm(fat_class~., data = bodytrain, C = i, kernel = j , cross = 5)
+    body <- predict(fat, bodytest[,-14])
+    confu <- confusionMatrix(table(body, bodytest[,14]))
+    df <- rbind(df, c(j, i, confu$overall[["Accuracy"]]))
+  }
+}
+
+```
+
+```{r}
+#get rid of the first row of NAs
+df <- na.omit(df)
+#look for maximum accuracy
+maxi <- max(df$Accuracy)
+df[df$Accuracy == maxi,]
+```
+
+In the end we obtain the most accurate models
